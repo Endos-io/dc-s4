@@ -1,0 +1,55 @@
+name: baseline
+on: [workflow_dispatch]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest    # Docker present: pytest-docker starts redis+vault itself
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'   # Phase 0 measured 3.12 ONLY. Changing this invalidates every count.
+
+      - uses: astral-sh/setup-uv@v5
+
+      # Phase 0 measured command. NOT the addendum sketch:
+      #   --no-hashes  is mandatory. Without it uv emits 992 --hash lines and pip exits 1 with
+      #                "The editable requirement .../.github/scripts cannot be installed when
+      #                 requiring hashes, because there is no single file to hash."
+      #   --only-group is what CI uses (103 pins). Plain --group yields 136 pins.
+      - name: Export test dependency group
+        run: uv export --no-hashes --only-group test -o requirements.txt
+
+      # dynaconf-release-utility is a LOCAL uv path source at .github/scripts/.
+      # Without this line, tests/test_release_utility.py fails to import release_utility
+      # and 56 tests become collection ERRORS (exit 2), not skips.
+      - name: Guard - local path source must be exported
+        run: |
+          grep -q '^-e \./\.github/scripts' requirements.txt \
+            || { echo "::error::requirements.txt is missing '-e ./.github/scripts'"; exit 1; }
+
+      - name: Install
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+          python -c "import release_utility"
+
+      - name: Collected count must be 787
+        run: |
+          n=$(python -m pytest tests/ -p no:cacheprovider -p no:randomly -o addopts= \
+                -q --collect-only 2>/dev/null | grep -oE '^[0-9]+ tests collected' | grep -oE '^[0-9]+')
+          echo "collected=$n"
+          [ "$n" = "787" ] || { echo "::error::expected 787 collected, got $n"; exit 1; }
+
+      - name: Run suite
+        continue-on-error: true
+        run: |
+          python -m pytest tests/ --junit-xml=junit.xml \
+            -p no:cacheprovider -p no:randomly -o addopts=
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit
+          path: junit.xml
